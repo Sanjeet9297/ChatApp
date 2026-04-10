@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   StyleSheet,
   View,
@@ -12,32 +12,41 @@ import {
   Platform,
   Modal,
   Alert,
+  Linking,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Icon from 'react-native-vector-icons/Ionicons';
 import { horizontalScale, verticalScale, moderateScale } from '../utils/scaling';
 import BackButton from '../components/shared/BackButton';
-import { 
-  getFirestore, 
-  collection, 
-  addDoc, 
-  query, 
-  onSnapshot, 
-  orderBy, 
-  serverTimestamp 
+import {
+  getFirestore,
+  collection,
+  addDoc,
+  query,
+  onSnapshot,
+  orderBy,
+  serverTimestamp,
+  doc,
+  setDoc
 } from '@react-native-firebase/firestore';
 import { useAppSelector } from '../hooks/reduxHooks';
 import { launchImageLibrary } from 'react-native-image-picker';
-import DocumentPicker, { types } from 'react-native-document-picker';
+import { pick, types, isErrorWithCode, errorCodes } from '@react-native-documents/picker';
+import storage from '@react-native-firebase/storage';
 
 type Screen = 'Login' | 'Signup' | 'Home' | 'UserList' | 'Chat' | 'Call';
 
 type Message = {
   id: string;
-  text: string;
+  text?: string;
   senderId: string;
   receiverId: string;
   timestamp: any;
+  type: 'text' | 'image' | 'video' | 'file' | 'audio';
+  fileUri?: string;
+  fileName?: string;
+  _rawDate?: Date;
 };
 
 type Props = {
@@ -49,10 +58,18 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isAttachMenuVisible, setIsAttachMenuVisible] = useState(false);
-  
+  const [otherUserTyping, setOtherUserTyping] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [viewingImage, setViewingImage] = useState<string | null>(null);
+  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const currentUser = useAppSelector(state => state.user.user);
-  const otherUser = params?.user; 
+  const otherUser = params?.user;
   const db = getFirestore();
+
+  const chatId = currentUser?.uid && otherUser?.uid
+    ? [currentUser.uid, otherUser.uid].sort().join('_')
+    : null;
 
   useEffect(() => {
     if (!currentUser?.uid || !otherUser?.uid) return;
@@ -66,42 +83,153 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
       const allMsgs: Message[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
-        const isBetweenUs = 
+        const isBetweenUs =
           (data.senderId === currentUser.uid && data.receiverId === otherUser.uid) ||
           (data.senderId === otherUser.uid && data.receiverId === currentUser.uid);
 
         if (isBetweenUs) {
+          const rawDate = data.timestamp?.toDate ? data.timestamp.toDate() : new Date();
           allMsgs.push({
             id: doc.id,
             text: data.text,
             senderId: data.senderId,
             receiverId: data.receiverId,
-            timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '...',
-          });
+            type: data.type || 'text',
+            fileUri: data.fileUri,
+            fileName: data.fileName,
+            timestamp: rawDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            _rawDate: rawDate,
+          } as any);
         }
       });
-      setMessages(allMsgs);
+
+      let groupedMsgs: any[] = [];
+      let currentDateStr = '';
+
+      allMsgs.forEach(msg => {
+        const msgDateStr = (msg._rawDate || new Date()).toDateString();
+        if (msgDateStr !== currentDateStr) {
+          currentDateStr = msgDateStr;
+          const today = new Date().toDateString();
+          const yesterday = new Date(Date.now() - 86400000).toDateString();
+          let headerTitle = msgDateStr;
+          if (msgDateStr === today) headerTitle = 'Today';
+          else if (msgDateStr === yesterday) headerTitle = 'Yesterday';
+
+          groupedMsgs.push({
+            id: `date-${msgDateStr}`,
+            isDateHeader: true,
+            text: headerTitle,
+          });
+        }
+        groupedMsgs.push(msg);
+      });
+
+      setMessages(groupedMsgs);
     }, (error) => {
       console.error("[Chat] Sync Error:", error);
     });
 
-    return () => unsubscribe();
-  }, [currentUser?.uid, otherUser?.uid]);
+    let unsubTyping = () => { };
+    if (chatId) {
+      unsubTyping = onSnapshot(doc(db, 'chats', chatId), (documentSnapshot) => {
+        if (documentSnapshot.exists()) {
+          const data = documentSnapshot.data();
+          if (data?.typing?.[otherUser.uid]) {
+            setOtherUserTyping(true);
+          } else {
+            setOtherUserTyping(false);
+          }
+        }
+      });
+    }
+
+    return () => {
+      unsubscribe();
+      unsubTyping();
+    };
+  }, [currentUser?.uid, otherUser?.uid, chatId]);
+
+  const updateTypingStatus = async (typing: boolean) => {
+    if (!chatId || !currentUser?.uid) return;
+    try {
+      await setDoc(doc(db, 'chats', chatId), {
+        typing: { [currentUser.uid]: typing }
+      }, { merge: true });
+    } catch (e) {
+      console.log('Error updating typing', e);
+    }
+  };
+
+  const handleTyping = () => {
+    updateTypingStatus(true);
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
+      updateTypingStatus(false);
+    }, 1500);
+  };
+
+  const handleChangeText = (text: string) => {
+    setInputText(text);
+    if (text.length > 0) {
+      handleTyping();
+    } else {
+      updateTypingStatus(false);
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    }
+  };
 
   const handleSendMessage = async () => {
     if (inputText.trim() === '' || !currentUser || !otherUser) return;
     const textToSend = inputText;
-    setInputText(''); 
+    setInputText('');
+
+    updateTypingStatus(false);
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
 
     try {
       await addDoc(collection(db, 'messages'), {
         text: textToSend,
         senderId: currentUser.uid,
         receiverId: otherUser.uid,
+        type: 'text',
         timestamp: serverTimestamp(),
       });
     } catch (error) {
       console.error("[Chat] Send failed:", error);
+    }
+  };
+
+  const sendFileMessage = async (fileData: { uri: string, name: string, type: Message['type'] }) => {
+    if (!currentUser || !otherUser) return;
+    try {
+      setIsUploading(true);
+      let downloadURL = fileData.uri;
+      
+      // Upload to Firebase Storage if it's a local file
+      if (!fileData.uri.startsWith('http')) {
+        const extension = fileData.name.split('.').pop() || 'unknown';
+        const filename = `${Date.now()}_${Math.random().toString(36).substring(7)}.${extension}`;
+        // chatId will safely be string here because we are in chat room
+        const storageRef = storage().ref(`chats/${chatId || 'general'}/${filename}`);
+        
+        await storageRef.putFile(fileData.uri);
+        downloadURL = await storageRef.getDownloadURL();
+      }
+
+      await addDoc(collection(db, 'messages'), {
+        senderId: currentUser.uid,
+        receiverId: otherUser.uid,
+        type: fileData.type,
+        fileUri: downloadURL,
+        fileName: fileData.name,
+        timestamp: serverTimestamp(),
+      });
+    } catch (error) {
+      console.error("[Chat] File send failed:", error);
+      Alert.alert('Error', 'Failed to upload and send file. Please ensure storage is configured.');
+    } finally {
+      setIsUploading(false);
     }
   };
 
@@ -111,10 +239,14 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
       mediaType: 'photo',
       includeBase64: false,
     });
-    
+
     if (result.assets && result.assets.length > 0) {
-      Alert.alert('Image Selected', result.assets[0].fileName || 'Image');
-      // Later: Upload to Firebase Storage
+      const asset = result.assets[0];
+      sendFileMessage({
+        uri: asset.uri || '',
+        name: asset.fileName || 'Image',
+        type: 'image'
+      });
     }
   };
 
@@ -123,27 +255,39 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
     const result = await launchImageLibrary({
       mediaType: 'video',
     });
-    
+
     if (result.assets && result.assets.length > 0) {
-      Alert.alert('Video Selected', result.assets[0].fileName || 'Video');
+      const asset = result.assets[0];
+      sendFileMessage({
+        uri: asset.uri || '',
+        name: asset.fileName || 'Video',
+        type: 'video'
+      });
     }
   };
 
-  const handleFilePicker = async (type: 'doc' | 'txt' | 'audio' | 'gif') => {
+  const handleFilePicker = async (fileType: 'doc' | 'txt' | 'audio' | 'gif') => {
     setIsAttachMenuVisible(false);
     try {
       let pickType: any = types.allFiles;
-      if (type === 'audio') pickType = types.audio;
-      if (type === 'doc') pickType = [types.pdf, types.doc, types.docx];
-      if (type === 'txt') pickType = [types.plainText];
-      if (type === 'gif') pickType = [types.images];
+      if (fileType === 'audio') pickType = types.audio;
+      if (fileType === 'doc') pickType = [types.pdf, types.doc, types.docx];
+      if (fileType === 'txt') pickType = [types.plainText];
+      if (fileType === 'gif') pickType = [types.images];
 
-      const res = await DocumentPicker.pick({
+      const res = await pick({
         type: pickType,
       });
-      Alert.alert('File Selected', res[0].name || 'File');
-    } catch (err) {
-      if (DocumentPicker.isCancel(err)) {
+
+      if (res && res.length > 0) {
+        sendFileMessage({
+          uri: res[0].uri,
+          name: res[0].name || 'File',
+          type: fileType === 'audio' ? 'audio' : (fileType === 'gif' ? 'image' : 'file')
+        });
+      }
+    } catch (err: any) {
+      if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) {
         console.log('User cancelled the picker');
       } else {
         console.error('File pick error:', err);
@@ -151,13 +295,79 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
     }
   };
 
-  const renderMessage = ({ item }: { item: Message }) => {
+  const renderMessage = ({ item }: { item: any }) => {
+    if (item.isDateHeader) {
+      return (
+        <View style={styles.dateHeaderContainer}>
+          <Text style={styles.dateHeaderText}>{item.text}</Text>
+        </View>
+      );
+    }
+
     const isMe = item.senderId === currentUser?.uid;
+
+    const renderContent = () => {
+      switch (item.type) {
+        case 'image':
+          return (
+            <Image
+              source={{ uri: item.fileUri }}
+              style={styles.messageImage}
+              resizeMode="cover"
+            />
+          );
+        case 'video':
+          return (
+            <View style={styles.fileContainer}>
+              <Icon name="videocam" size={moderateScale(30)} color={isMe ? "#FFF" : "#1565C0"} />
+              <Text style={[styles.fileName, isMe ? styles.whiteText : styles.blackText]} numberOfLines={1}>
+                {item.fileName || 'Video'}
+              </Text>
+            </View>
+          );
+        case 'audio':
+          return (
+            <View style={styles.fileContainer}>
+              <Icon name="musical-notes" size={moderateScale(30)} color={isMe ? "#FFF" : "#1565C0"} />
+              <Text style={[styles.fileName, isMe ? styles.whiteText : styles.blackText]} numberOfLines={1}>
+                {item.fileName || 'Audio'}
+              </Text>
+            </View>
+          );
+        case 'file':
+          return (
+            <View style={styles.fileContainer}>
+              <Icon name="document-text" size={moderateScale(30)} color={isMe ? "#FFF" : "#1565C0"} />
+              <Text style={[styles.fileName, isMe ? styles.whiteText : styles.blackText]} numberOfLines={1}>
+                {item.fileName || 'Document'}
+              </Text>
+            </View>
+          );
+        default:
+          return <Text style={[styles.messageText, isMe ? styles.whiteText : styles.blackText]}>{item.text}</Text>;
+      }
+    };
+
+    const handlePressMessage = () => {
+      if (item.type === 'image' && item.fileUri) {
+        setViewingImage(item.fileUri);
+      } else if (item.fileUri && (item.type === 'video' || item.type === 'file' || item.type === 'audio')) {
+        Linking.openURL(item.fileUri).catch(err => {
+          console.error("Failed to open URL:", err);
+          Alert.alert("Error", "Could not open this file.");
+        });
+      }
+    };
+
     return (
-      <View style={[styles.messageBubble, isMe ? styles.myBubble : styles.otherBubble]}>
-        <Text style={[styles.messageText, isMe ? styles.whiteText : styles.blackText]}>{item.text}</Text>
-        <Text style={styles.timestamp}>{item.timestamp}</Text>
-      </View>
+      <TouchableOpacity 
+        activeOpacity={0.8}
+        onPress={handlePressMessage}
+        style={[styles.messageBubble, isMe ? styles.myBubble : styles.otherBubble, item.type === 'image' && styles.imageBubble]}
+      >
+        {renderContent()}
+        <Text style={[styles.timestamp, item.type === 'image' && styles.imageTimestamp]}>{item.timestamp}</Text>
+      </TouchableOpacity>
     );
   };
 
@@ -170,21 +380,33 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
     </TouchableOpacity>
   );
 
+  const startCall = (type: 'audio' | 'video') => {
+    onNavigate('Call', {
+      user: otherUser,
+      isCaller: true,
+      callType: type,
+    });
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
-      
+
       <View style={styles.header}>
         <BackButton onPress={() => onNavigate('UserList')} />
         <Image source={{ uri: otherUser?.pic || otherUser?.avatar || 'https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg' }} style={styles.headerAvatar} />
         <View style={styles.headerInfo}>
           <Text style={styles.headerName}>{otherUser?.name || 'User'}</Text>
-          <Text style={styles.headerStatus}>Online</Text>
+          <Text style={[styles.headerStatus, otherUserTyping && { color: '#1565C0', fontStyle: 'italic', fontWeight: 'bold' }]}>
+            {otherUserTyping ? 'typing...' : 'Online'}
+          </Text>
         </View>
         <View style={styles.headerActions}>
-          <Icon name="call-outline" size={moderateScale(20)} color="#1565C0" style={{ marginRight: horizontalScale(15) }} />
-          <TouchableOpacity onPress={() => onNavigate('Call', { user: otherUser })}>
-            <Icon name="videocam-outline" size={moderateScale(20)} color="#1565C0" />
+          <TouchableOpacity onPress={() => startCall('audio')}>
+            <Icon name="call" size={moderateScale(22)} color="#1565C0" style={{ marginRight: horizontalScale(15) }} />
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => startCall('video')}>
+            <Icon name="videocam" size={moderateScale(24)} color="#1565C0" />
           </TouchableOpacity>
         </View>
       </View>
@@ -202,6 +424,18 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
         )}
       />
 
+      {/* Full Screen Image Viewer Modal */}
+      <Modal visible={!!viewingImage} transparent={true} animationType="fade" onRequestClose={() => setViewingImage(null)}>
+        <View style={styles.imageViewerContainer}>
+          <TouchableOpacity style={styles.imageViewerCloseBtn} onPress={() => setViewingImage(null)}>
+            <Icon name="close" size={moderateScale(30)} color="#FFF" />
+          </TouchableOpacity>
+          {viewingImage && (
+            <Image source={{ uri: viewingImage }} style={styles.fullScreenImage} resizeMode="contain" />
+          )}
+        </View>
+      </Modal>
+
       {/* Attachment Menu Modal */}
       <Modal
         visible={isAttachMenuVisible}
@@ -209,7 +443,7 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
         animationType="fade"
         onRequestClose={() => setIsAttachMenuVisible(false)}
       >
-        <TouchableOpacity 
+        <TouchableOpacity
           style={styles.modalOverlay}
           activeOpacity={1}
           onPress={() => setIsAttachMenuVisible(false)}
@@ -232,7 +466,7 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
         keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 25}
         style={styles.inputArea}
       >
-        <TouchableOpacity 
+        <TouchableOpacity
           style={styles.attachBtn}
           onPress={() => setIsAttachMenuVisible(true)}
         >
@@ -242,11 +476,15 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
           style={styles.input}
           placeholder="New Message..."
           value={inputText}
-          onChangeText={setInputText}
+          onChangeText={handleChangeText}
           multiline
         />
-        <TouchableOpacity style={styles.sendBtn} onPress={handleSendMessage}>
-          <Icon name="send" size={moderateScale(24)} color="#FFF" />
+        <TouchableOpacity style={styles.sendBtn} onPress={handleSendMessage} disabled={isUploading}>
+          {isUploading ? (
+            <ActivityIndicator size="small" color="#FFF" />
+          ) : (
+            <Icon name="send" size={moderateScale(24)} color="#FFF" />
+          )}
         </TouchableOpacity>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -265,62 +503,91 @@ const styles = StyleSheet.create({
     borderBottomColor: '#EEE',
     elevation: 3,
   },
-  headerAvatar: { 
-    width: horizontalScale(45), 
-    height: horizontalScale(45), 
-    borderRadius: horizontalScale(22.5), 
-    marginLeft: horizontalScale(10) 
+  headerAvatar: {
+    width: horizontalScale(45),
+    height: horizontalScale(45),
+    borderRadius: horizontalScale(22.5),
+    marginLeft: horizontalScale(10)
   },
   headerInfo: { flex: 1, marginLeft: horizontalScale(12) },
   headerName: { fontSize: moderateScale(18), fontWeight: 'bold', color: '#333' },
   headerStatus: { fontSize: moderateScale(13), color: '#4CAF50' },
   headerActions: { flexDirection: 'row', alignItems: 'center' },
   messageList: { padding: moderateScale(15), paddingBottom: verticalScale(30) },
-  messageBubble: { 
-    maxWidth: '80%', 
-    padding: moderateScale(12), 
-    borderRadius: moderateScale(20), 
-    marginBottom: verticalScale(12), 
-    elevation: 1 
+  messageBubble: {
+    maxWidth: '80%',
+    padding: moderateScale(12),
+    borderRadius: moderateScale(20),
+    marginBottom: verticalScale(12),
+    elevation: 1
+  },
+  imageBubble: {
+    padding: moderateScale(4),
+    backgroundColor: '#FFF',
   },
   myBubble: { alignSelf: 'flex-end', backgroundColor: '#1565C0', borderBottomRightRadius: 2 },
   otherBubble: { alignSelf: 'flex-start', backgroundColor: '#FFF', borderBottomLeftRadius: 2 },
   messageText: { fontSize: moderateScale(16) },
+  messageImage: {
+    width: horizontalScale(220),
+    height: verticalScale(150),
+    borderRadius: moderateScale(15),
+  },
+  fileContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: moderateScale(5),
+    width: horizontalScale(200),
+  },
+  fileName: {
+    fontSize: moderateScale(14),
+    marginLeft: horizontalScale(10),
+    flex: 1,
+  },
   whiteText: { color: '#FFF' },
   blackText: { color: '#333' },
-  timestamp: { 
-    fontSize: moderateScale(10), 
-    alignSelf: 'flex-end', 
-    marginTop: verticalScale(4), 
-    color: 'rgba(0,0,0,0.3)' 
+  timestamp: {
+    fontSize: moderateScale(10),
+    alignSelf: 'flex-end',
+    marginTop: verticalScale(4),
+    color: 'rgba(0,0,0,0.3)'
   },
-  inputArea: { 
-    flexDirection: 'row', 
-    alignItems: 'flex-end', 
-    padding: moderateScale(10), 
-    backgroundColor: '#FFF', 
-    borderTopWidth: 1, 
-    borderTopColor: '#EEE' 
+  imageTimestamp: {
+    position: 'absolute',
+    bottom: moderateScale(8),
+    right: moderateScale(8),
+    color: '#FFF',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
+  },
+  inputArea: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    padding: moderateScale(10),
+    backgroundColor: '#FFF',
+    borderTopWidth: 1,
+    borderTopColor: '#EEE'
   },
   attachBtn: { padding: moderateScale(10) },
-  input: { 
-    flex: 1, 
-    backgroundColor: '#F0F0F0', 
-    borderRadius: moderateScale(25), 
-    paddingHorizontal: horizontalScale(15), 
-    paddingVertical: verticalScale(8), 
-    maxHeight: verticalScale(100), 
+  input: {
+    flex: 1,
+    backgroundColor: '#F0F0F0',
+    borderRadius: moderateScale(25),
+    paddingHorizontal: horizontalScale(15),
+    paddingVertical: verticalScale(8),
+    maxHeight: verticalScale(100),
     color: '#333',
     fontSize: moderateScale(15),
   },
-  sendBtn: { 
-    width: horizontalScale(45), 
-    height: horizontalScale(45), 
-    borderRadius: horizontalScale(22.5), 
-    backgroundColor: '#1565C0', 
-    justifyContent: 'center', 
-    alignItems: 'center', 
-    marginLeft: horizontalScale(10) 
+  sendBtn: {
+    width: horizontalScale(45),
+    height: horizontalScale(45),
+    borderRadius: horizontalScale(22.5),
+    backgroundColor: '#1565C0',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: horizontalScale(10)
   },
   emptyChatContainer: {
     flex: 1,
@@ -370,6 +637,37 @@ const styles = StyleSheet.create({
     fontSize: moderateScale(12),
     color: '#666',
     fontWeight: '500',
+  },
+  imageViewerContainer: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.95)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  imageViewerCloseBtn: {
+    position: 'absolute',
+    top: verticalScale(40),
+    right: horizontalScale(20),
+    zIndex: 10,
+    padding: moderateScale(10),
+  },
+  fullScreenImage: {
+    width: '100%',
+    height: '100%',
+  },
+  dateHeaderContainer: {
+    alignItems: 'center',
+    marginVertical: verticalScale(15),
+  },
+  dateHeaderText: {
+    backgroundColor: '#EAEAEC',
+    color: '#666',
+    paddingHorizontal: horizontalScale(12),
+    paddingVertical: verticalScale(4),
+    borderRadius: moderateScale(12),
+    fontSize: moderateScale(11),
+    fontWeight: '600',
+    overflow: 'hidden',
   },
 });
 

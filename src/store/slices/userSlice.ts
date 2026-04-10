@@ -9,6 +9,7 @@ export interface User {
   pic?: string;
   token?: string;
   createdAt?: any;
+  isOnline?: boolean;
 }
 
 interface UserState {

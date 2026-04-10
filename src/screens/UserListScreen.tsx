@@ -22,6 +22,7 @@ type User = {
   name: string;
   email: string;
   pic?: string;
+  isOnline?: boolean;
 };
 
 type Props = {
@@ -87,10 +88,13 @@ const UserListScreen: React.FC<Props> = ({ onNavigate }) => {
       style={styles.userCard}
       onPress={() => onNavigate('Chat', { user: item })}
     >
-      <Image source={{ uri: item.pic || 'https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg' }} style={styles.avatar} />
+      <View>
+        <Image source={{ uri: item.pic || 'https://icon-library.com/images/anonymous-avatar-icon/anonymous-avatar-icon-25.jpg' }} style={styles.avatar} />
+        {item.isOnline && <View style={styles.onlineBadge} />}
+      </View>
       <View style={styles.userInfo}>
         <Text style={styles.userName}>{item.name}</Text>
-        <Text style={styles.userEmail}>{item.email}</Text>
+        <Text style={styles.userEmail}>{item.isOnline ? 'Online' : item.email}</Text>
       </View>
       <Icon name="chevron-forward-outline" size={moderateScale(20)} color="#CCC" />
     </TouchableOpacity>
@@ -193,6 +197,17 @@ const styles = StyleSheet.create({
     fontSize: moderateScale(16),
     color: '#888',
     textAlign: 'center',
+  },
+  onlineBadge: {
+    position: 'absolute',
+    bottom: 2,
+    right: 2,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#4CAF50',
+    borderWidth: 2,
+    borderColor: '#FFF',
   },
 });
 

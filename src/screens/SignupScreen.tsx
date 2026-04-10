@@ -64,19 +64,19 @@ const SignupScreen: React.FC<Props> = ({ onNavigate }) => {
       };
 
       await setDoc(doc(db, 'users', uid), userData);
-      
+
       // 3. Update Redux Store
       dispatch(setUser(userData));
       dispatch(setLoading(false));
       setIsLoading(false);
-      
+
       Alert.alert('Success', 'Account created successfully!');
       onNavigate('Home');
     } catch (error: any) {
       console.error('SIGNUP_ERROR:', error);
       setIsLoading(false);
       dispatch(setLoading(false));
-      
+
       let msg = 'Registration failed.';
       if (error.code === 'auth/email-already-in-use') {
         msg = 'That email address is already in use!';
@@ -85,7 +85,7 @@ const SignupScreen: React.FC<Props> = ({ onNavigate }) => {
       } else if (error.message) {
         msg = error.message;
       }
-      
+
       Alert.alert('Registration Failed', msg);
     }
   };
@@ -175,41 +175,41 @@ const SignupScreen: React.FC<Props> = ({ onNavigate }) => {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFFFFF' },
   scrollContainer: { padding: moderateScale(30), flexGrow: 1 },
-  backBtnContainer: { 
+  backBtnContainer: {
     marginBottom: verticalScale(24),
     alignSelf: 'flex-start',
   },
   header: { marginBottom: verticalScale(32) },
   title: { fontSize: moderateScale(32), fontWeight: 'bold', color: '#1A1A2E' },
-  subtitle: { 
-    fontSize: moderateScale(15), 
-    color: '#888', 
-    marginTop: verticalScale(6), 
-    lineHeight: moderateScale(22) 
+  subtitle: {
+    fontSize: moderateScale(15),
+    color: '#888',
+    marginTop: verticalScale(6),
+    lineHeight: moderateScale(22)
   },
   form: { width: '100%' },
-  termsText: { 
-    fontSize: moderateScale(13), 
-    color: '#AAA', 
-    marginVertical: verticalScale(14), 
-    textAlign: 'center', 
-    lineHeight: moderateScale(20) 
+  termsText: {
+    fontSize: moderateScale(13),
+    color: '#AAA',
+    marginVertical: verticalScale(14),
+    textAlign: 'center',
+    lineHeight: moderateScale(20)
   },
   termsLink: { color: '#1565C0', fontWeight: '600' },
-  footerRow: { 
-    flexDirection: 'row', 
-    justifyContent: 'center', 
-    marginTop: verticalScale(28), 
-    marginBottom: verticalScale(20) 
+  footerRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginTop: verticalScale(28),
+    marginBottom: verticalScale(20)
   },
-  footerText: { 
-    color: '#888', 
-    fontSize: moderateScale(15) 
+  footerText: {
+    color: '#888',
+    fontSize: moderateScale(15)
   },
-  linkText: { 
-    color: '#1565C0', 
-    fontSize: moderateScale(15), 
-    fontWeight: 'bold' 
+  linkText: {
+    color: '#1565C0',
+    fontSize: moderateScale(15),
+    fontWeight: 'bold'
   },
 });
 

@@ -17,8 +17,9 @@ import CustomButton from '../components/CustomButton';
 import { horizontalScale, verticalScale, moderateScale } from '../utils/scaling';
 import { useAppDispatch } from '../hooks/reduxHooks';
 import { setUser, setLoading, User } from '../store/slices/userSlice';
-import { getAuth, signInWithEmailAndPassword } from '@react-native-firebase/auth';
-import { getFirestore, doc, getDoc } from '@react-native-firebase/firestore';
+import { getAuth, signInWithEmailAndPassword, GoogleAuthProvider, signInWithCredential } from '@react-native-firebase/auth';
+import { getFirestore, doc, getDoc, setDoc, updateDoc } from '@react-native-firebase/firestore';
+import { GoogleSignin } from '@react-native-google-signin/google-signin';
 
 type Screen = 'Login' | 'Signup' | 'Home' | 'UserList' | 'Chat';
 
@@ -31,6 +32,61 @@ const LoginScreen: React.FC<Props> = ({ onNavigate }) => {
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const dispatch = useAppDispatch();
+  const db = getFirestore();
+  const auth = getAuth();
+
+  React.useEffect(() => {
+    GoogleSignin.configure({
+      webClientId: '691761421299-iij6jnftdhp9gk7ukuncok1d6cteu5dr.apps.googleusercontent.com', // Get this from Firebase Console
+    });
+  }, []);
+
+  const onGoogleButtonPress = async () => {
+    try {
+      setIsLoading(true);
+      // 1. Check if your device supports Google Play
+      await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
+
+      // 2. Get the users ID token
+      const signInResult = await GoogleSignin.signIn();
+      const idToken = signInResult.data?.idToken;
+
+      if (!idToken) throw new Error('No ID token found');
+
+      // 3. Create a Google credential with the token
+      const googleCredential = GoogleAuthProvider.credential(idToken);
+
+      // 4. Sign-in the user with the credential
+      const userCredential = await signInWithCredential(auth, googleCredential);
+      const user = userCredential.user;
+
+      // 5. Check/Create user in Firestore
+      const userDoc = await getDoc(doc(db, 'users', user.uid));
+
+      let userData: User;
+      if (!userDoc.exists()) {
+        userData = {
+          uid: user.uid,
+          name: user.displayName || 'Google User',
+          email: user.email || '',
+          pic: user.photoURL || '',
+          isOnline: true,
+        };
+        await setDoc(doc(db, 'users', user.uid), userData);
+      } else {
+        userData = userDoc.data() as User;
+        await updateDoc(doc(db, 'users', user.uid), { isOnline: true });
+      }
+
+      dispatch(setUser(userData));
+      onNavigate('Home');
+    } catch (error: any) {
+      console.error('GOOGLE_LOGIN_ERROR:', error);
+      Alert.alert('Google Error', error.message);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const handleLogin = async () => {
     if (!email || !password) {
@@ -53,12 +109,12 @@ const LoginScreen: React.FC<Props> = ({ onNavigate }) => {
 
       if (userDoc.exists()) {
         const userData = userDoc.data() as User;
-        
+
         // 3. Save to Redux Store
         dispatch(setUser(userData));
         dispatch(setLoading(false));
         setIsLoading(false);
-        
+
         onNavigate('Home');
       } else {
         throw new Error('User data not found in Firestore.');
@@ -67,7 +123,7 @@ const LoginScreen: React.FC<Props> = ({ onNavigate }) => {
       setIsLoading(false);
       dispatch(setLoading(false));
       console.error('LOGIN_ERROR:', error);
-      
+
       let msg = 'Login failed.';
       if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') {
         msg = 'Invalid email or password.';
@@ -76,7 +132,7 @@ const LoginScreen: React.FC<Props> = ({ onNavigate }) => {
       } else if (error.message) {
         msg = error.message;
       }
-      
+
       Alert.alert('Login Failed', msg);
     }
   };
@@ -139,7 +195,7 @@ const LoginScreen: React.FC<Props> = ({ onNavigate }) => {
           </View>
 
           <View style={styles.socialRow}>
-            <TouchableOpacity style={styles.socialBtn}>
+            <TouchableOpacity style={styles.socialBtn} onPress={onGoogleButtonPress}>
               <Icon name="logo-google" size={moderateScale(24)} color="#DB4437" />
             </TouchableOpacity>
             <TouchableOpacity style={styles.socialBtn}>
@@ -164,14 +220,14 @@ const LoginScreen: React.FC<Props> = ({ onNavigate }) => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFFFFF' },
-  scrollContainer: { 
-    padding: moderateScale(30), 
-    flexGrow: 1, 
-    justifyContent: 'center' 
+  scrollContainer: {
+    padding: moderateScale(30),
+    flexGrow: 1,
+    justifyContent: 'center'
   },
-  header: { 
-    alignItems: 'center', 
-    marginBottom: verticalScale(36) 
+  header: {
+    alignItems: 'center',
+    marginBottom: verticalScale(36)
   },
   iconWrap: {
     width: horizontalScale(90),
@@ -182,42 +238,42 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: verticalScale(16),
   },
-  title: { 
-    fontSize: moderateScale(28), 
-    fontWeight: 'bold', 
-    color: '#1A1A2E' 
+  title: {
+    fontSize: moderateScale(28),
+    fontWeight: 'bold',
+    color: '#1A1A2E'
   },
-  subtitle: { 
-    fontSize: moderateScale(15), 
-    color: '#888', 
-    marginTop: verticalScale(6), 
-    textAlign: 'center' 
+  subtitle: {
+    fontSize: moderateScale(15),
+    color: '#888',
+    marginTop: verticalScale(6),
+    textAlign: 'center'
   },
   form: { width: '100%' },
-  forgotPass: { 
-    alignSelf: 'flex-end', 
-    marginBottom: verticalScale(6) 
+  forgotPass: {
+    alignSelf: 'flex-end',
+    marginBottom: verticalScale(6)
   },
-  forgotPassText: { 
-    color: '#1565C0', 
-    fontWeight: '600', 
-    fontSize: moderateScale(14) 
+  forgotPassText: {
+    color: '#1565C0',
+    fontWeight: '600',
+    fontSize: moderateScale(14)
   },
-  dividerRow: { 
-    flexDirection: 'row', 
-    alignItems: 'center', 
-    marginVertical: verticalScale(20) 
+  dividerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: verticalScale(20)
   },
   line: { flex: 1, height: 1, backgroundColor: '#EEE' },
-  dividerText: { 
-    marginHorizontal: horizontalScale(12), 
-    color: '#AAA', 
-    fontSize: moderateScale(13) 
+  dividerText: {
+    marginHorizontal: horizontalScale(12),
+    color: '#AAA',
+    fontSize: moderateScale(13)
   },
-  socialRow: { 
-    flexDirection: 'row', 
-    justifyContent: 'center', 
-    gap: horizontalScale(16) 
+  socialRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: horizontalScale(16)
   },
   socialBtn: {
     width: horizontalScale(58),
@@ -232,19 +288,19 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.08,
     shadowRadius: 4,
   },
-  footerRow: { 
-    flexDirection: 'row', 
-    justifyContent: 'center', 
-    marginTop: verticalScale(30) 
+  footerRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginTop: verticalScale(30)
   },
-  footerText: { 
-    color: '#888', 
-    fontSize: moderateScale(15) 
+  footerText: {
+    color: '#888',
+    fontSize: moderateScale(15)
   },
-  linkText: { 
-    color: '#1565C0', 
-    fontSize: moderateScale(15), 
-    fontWeight: 'bold' 
+  linkText: {
+    color: '#1565C0',
+    fontSize: moderateScale(15),
+    fontWeight: 'bold'
   },
 });
 

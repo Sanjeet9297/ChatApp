@@ -1,10 +1,11 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   StyleSheet,
   View,
   Text,
   TextInput,
   TextInputProps,
+  TouchableOpacity,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/Ionicons';
 import { horizontalScale, verticalScale, moderateScale } from '../utils/scaling';
@@ -14,7 +15,13 @@ interface CustomInputProps extends TextInputProps {
   icon: string;
 }
 
-const CustomInput: React.FC<CustomInputProps> = ({ label, icon, ...props }) => {
+const CustomInput: React.FC<CustomInputProps> = ({ label, icon, secureTextEntry, ...props }) => {
+  const [isPasswordVisible, setIsPasswordVisible] = useState(false);
+  
+  const isPasswordField = secureTextEntry !== undefined;
+  const secureText = isPasswordField ? !isPasswordVisible : undefined;
+  const hasText = props.value !== undefined && props.value.length > 0;
+
   return (
     <View style={styles.container}>
       <Text style={styles.label}>{label}</Text>
@@ -23,8 +30,14 @@ const CustomInput: React.FC<CustomInputProps> = ({ label, icon, ...props }) => {
         <TextInput 
           style={styles.input} 
           placeholderTextColor="#AAA"
+          secureTextEntry={secureText}
           {...props} 
         />
+        {isPasswordField && hasText && (
+          <TouchableOpacity onPress={() => setIsPasswordVisible(!isPasswordVisible)} style={styles.eyeIcon}>
+            <Icon name={isPasswordVisible ? "eye-off-outline" : "eye-outline"} size={moderateScale(20)} color="#AAA" />
+          </TouchableOpacity>
+        )}
       </View>
     </View>
   );
@@ -58,6 +71,10 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: moderateScale(15),
     color: '#333',
+  },
+  eyeIcon: {
+    padding: moderateScale(5),
+    marginLeft: horizontalScale(5),
   },
 });
 

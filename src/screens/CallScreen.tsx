@@ -13,28 +13,60 @@ import createAgoraRtcEngine, {
   ClientRoleType,
   IRtcEngine,
   RtcSurfaceView,
-  VideoViewSetupMode,
 } from 'react-native-agora';
 import Icon from 'react-native-vector-icons/Ionicons';
 import { horizontalScale, verticalScale, moderateScale } from '../utils/scaling';
+import { getFirestore, doc, setDoc, onSnapshot, updateDoc } from '@react-native-firebase/firestore';
+import { useAppSelector } from '../hooks/reduxHooks';
 
 const APP_ID = '248782893c04415aab5258e24ed9a17c';
 
 type Props = {
-  onNavigate: (screen: any) => void;
+  onNavigate: (screen: any, params?: any) => void;
   params?: any;
 };
 
 const CallScreen: React.FC<Props> = ({ onNavigate, params }) => {
+  const { isCaller, user: otherUser, callType } = params;
+  
+  const currentUser = useAppSelector(state => state.user.user);
+  const db = getFirestore();
+  
+  // Create a predictable unique channel ID for the new call
+  const [channelId] = useState(params.channelId || `call_${currentUser?.uid}_${Date.now()}`);
+
   const agoraEngine = useRef<IRtcEngine | null>(null);
   const [joined, setJoined] = useState(false);
   const [remoteUid, setRemoteUid] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
   const [isFrontCamera, setIsFrontCamera] = useState(true);
+  const [callStatus, setCallStatus] = useState<'ringing' | 'accepted' | 'rejected' | 'ended'>(isCaller ? 'ringing' : 'accepted');
 
-  // In a real app, channelId would be unique for the chat (e.g., chatDocId)
-  const channelId = params?.channelId || 'test_channel';
-  const otherUser = params?.user || { name: 'User' };
+  useEffect(() => {
+    if (isCaller) {
+      setDoc(doc(db, 'calls', channelId), {
+        callerId: currentUser?.uid || 'unknown',
+        callerName: currentUser?.name || 'User',
+        callerAvatar: currentUser?.pic || currentUser?.avatar || null,
+        calleeId: otherUser?.uid || 'unknown',
+        status: 'ringing',
+        type: callType || 'video',
+      }).catch(e => console.log('Error creating call doc', e));
+    }
+
+    const unsub = onSnapshot(doc(db, 'calls', channelId), (docSnap) => {
+      if (docSnap.exists()) {
+        const st = docSnap.data()?.status;
+        setCallStatus(st);
+        if (st === 'rejected' || st === 'ended') {
+          Alert.alert('Call', `The call was ${st}.`);
+          endCallLocally();
+        }
+      }
+    });
+
+    return () => unsub();
+  }, []);
 
   useEffect(() => {
     setupVideoSDKEngine();
@@ -65,31 +97,50 @@ const CallScreen: React.FC<Props> = ({ onNavigate, params }) => {
       });
 
       engine.registerEventHandler({
-        onJoinChannelSuccess: (connection, elapsed) => {
-          console.log('[Agora] Joined successfully', connection.channelId);
+        onJoinChannelSuccess: () => {
+          console.log('[Agora] Joined channel success!');
           setJoined(true);
         },
-        onUserJoined: (connection, remoteUid, elapsed) => {
-          console.log('[Agora] Remote user joined', remoteUid);
-          setRemoteUid(remoteUid);
+        onUserJoined: (_con, uid) => {
+          console.log('[Agora] Remote user joined: ', uid);
+          setRemoteUid(uid);
         },
-        onUserOffline: (connection, remoteUid, reason) => {
-          console.log('[Agora] Remote user left', remoteUid);
+        onUserOffline: (_con, uid) => {
+          console.log('[Agora] Remote user left: ', uid);
           setRemoteUid(0);
+          leaveChannel(); // Auto leave when remote leaves
         },
-        onLeaveChannel: (connection, stats) => {
-          console.log('[Agora] Left channel');
+        onLeaveChannel: () => {
           setJoined(false);
           setRemoteUid(0);
         },
+        onError: (err, msg) => {
+          console.error('[Agora] Error: ', err, msg);
+          if (err === 109) {
+            Alert.alert('Agora Error', 'Token expired or invalid. Your Agora project probably requires a Token! Switch it to Testing Mode.');
+          } else if (err === 17) {
+            Alert.alert('Agora Error', 'Join channel rejected. Check your App ID or network.');
+          }
+        },
+        onConnectionStateChanged: (state, reason) => {
+           console.log('[Agora] Connection State: ', state, ' Reason: ', reason);
+        }
       });
 
-      engine.enableVideo();
-      engine.startPreview();
+      if (callType === 'video') {
+        engine.enableVideo();
+        engine.startPreview();
+      } else {
+        engine.disableVideo();
+        engine.enableAudio();
+      }
 
-      // Join the channel
       engine.joinChannel('', channelId, 0, {
         clientRoleType: ClientRoleType.ClientRoleBroadcaster,
+        publishMicrophoneTrack: true,
+        publishCameraTrack: callType === 'video',
+        autoSubscribeAudio: true,
+        autoSubscribeVideo: true,
       });
     } catch (e) {
       console.log('[Agora] Error:', e);
@@ -97,9 +148,25 @@ const CallScreen: React.FC<Props> = ({ onNavigate, params }) => {
     }
   };
 
-  const leaveChannel = () => {
+  const endCallLocally = () => {
     agoraEngine.current?.leaveChannel();
-    onNavigate('Chat'); // Fixed navigation call
+    // Navigate back to the specific user's chat room safely
+    if (otherUser) {
+      onNavigate('BackToChat', { user: otherUser });
+    } else {
+      onNavigate('UserList');
+    }
+  };
+
+  const leaveChannel = async () => {
+    try {
+      if (callStatus !== 'ended' && callStatus !== 'rejected') {
+        await updateDoc(doc(db, 'calls', channelId), { status: 'ended' });
+      }
+    } catch (e) {
+      console.log('Error updating status', e);
+    }
+    endCallLocally();
   };
 
   const toggleMute = () => {
@@ -116,34 +183,31 @@ const CallScreen: React.FC<Props> = ({ onNavigate, params }) => {
     <View style={styles.container}>
       {/* Remote Video (Background) */}
       <View style={styles.remoteVideoContainer}>
-        {remoteUid !== 0 ? (
-          <RtcSurfaceView
-            canvas={{ uid: remoteUid }}
-            style={styles.remoteVideo}
-          />
+        {remoteUid !== 0 && callType === 'video' ? (
+          <RtcSurfaceView canvas={{ uid: remoteUid }} style={styles.remoteVideo} />
         ) : (
           <View style={styles.placeholderContainer}>
              <Text style={styles.placeholderText}>
-              {joined ? `Waiting for ${otherUser.name}...` : 'Connecting...'}
+              {callStatus === 'ringing' ? `Calling ${otherUser?.name}...` : (joined && remoteUid === 0 ? `Waiting for ${otherUser?.name}...` : `${otherUser?.name}`)}
             </Text>
+            {callType === 'audio' && (
+               <Icon name="person-circle-outline" size={120} color="#555" style={{ marginTop: 20 }} />
+            )}
           </View>
         )}
       </View>
 
       {/* Local Video (Floating) */}
-      <View style={styles.localVideoContainer}>
-        {joined && (
-          <RtcSurfaceView
-            canvas={{ uid: 0 }}
-            style={styles.localVideo}
-          />
-        )}
-      </View>
+      {callType === 'video' && (
+        <View style={styles.localVideoContainer}>
+          <RtcSurfaceView canvas={{ uid: 0 }} style={styles.localVideo} />
+        </View>
+      )}
 
       {/* Header Info */}
       <View style={styles.header}>
-        <Text style={styles.userName}>{otherUser.name}</Text>
-        <Text style={styles.statusText}>{remoteUid !== 0 ? 'In Call' : 'Calling...'}</Text>
+        <Text style={styles.userName}>{otherUser?.name}</Text>
+        <Text style={styles.statusText}>{remoteUid !== 0 ? '00:00' : (callStatus === 'ringing' ? 'Ringing...' : 'Connecting...')}</Text>
       </View>
 
       {/* Controls */}
@@ -156,9 +220,11 @@ const CallScreen: React.FC<Props> = ({ onNavigate, params }) => {
           <Icon name="call" size={30} color="#FFF" />
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.controlBtn} onPress={switchCamera}>
-          <Icon name="camera-reverse" size={30} color="#333" />
-        </TouchableOpacity>
+        {callType === 'video' && (
+          <TouchableOpacity style={styles.controlBtn} onPress={switchCamera}>
+            <Icon name="camera-reverse" size={30} color="#333" />
+          </TouchableOpacity>
+        )}
       </View>
     </View>
   );

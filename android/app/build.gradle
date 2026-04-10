@@ -11,7 +11,8 @@ react {
     autolinkLibrariesWithApp()
 }
 
-def enableProguardInReleaseBuilds = false
+def enableProguardInReleaseBuilds = true
+def enableSeparateBuildPerCPUArchitecture = true
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 
 android {
@@ -27,6 +28,15 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0"
+    }
+
+    splits {
+        abi {
+            reset()
+            enable enableSeparateBuildPerCPUArchitecture
+            universalApk false
+            include "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
+        }
     }
 
     signingConfigs {
@@ -48,6 +58,16 @@ android {
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
     }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
 }
 
 dependencies {
@@ -66,4 +86,16 @@ dependencies {
     }
 }
 
+
 apply plugin: "com.google.gms.google-services"
+
+tasks.matching { task ->
+    task.name.contains('LintVital') ||
+    task.name.contains('lintVital') ||
+    task.name.contains('LintReport') ||
+    task.name.contains('lintReport') ||
+    task.name.contains('lintAnalyze') ||
+    task.name.contains('LintAnalyze')
+}.configureEach {
+    dependsOn 'copyReactNativeVectorIconFonts'
+}

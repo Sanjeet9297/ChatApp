@@ -9,6 +9,7 @@ export const API_CONFIG = {
         },
         USER: {
             LIST: '/api/user',
-        }
+        },
+        UPLOAD: '/upload-image',
     }
 };
