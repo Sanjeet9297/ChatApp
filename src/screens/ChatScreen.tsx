@@ -34,6 +34,7 @@ import { useAppSelector } from '../hooks/reduxHooks';
 import { launchImageLibrary } from 'react-native-image-picker';
 import { pick, types, isErrorWithCode, errorCodes } from '@react-native-documents/picker';
 import storage from '@react-native-firebase/storage';
+import { API_CONFIG } from '../config/api.config';
 
 type Screen = 'Login' | 'Signup' | 'Home' | 'UserList' | 'Chat' | 'Call';
 
@@ -200,23 +201,68 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
     }
   };
 
-  const sendFileMessage = async (fileData: { uri: string, name: string, type: Message['type'] }) => {
+  const sendFileMessage = async (fileData: { uri: string, name: string, type: Message['type'], mimeType?: string }) => {
     if (!currentUser || !otherUser) return;
     try {
       setIsUploading(true);
       let downloadURL = fileData.uri;
-      
-      // Upload to Firebase Storage if it's a local file
-      if (!fileData.uri.startsWith('http')) {
-        const extension = fileData.name.split('.').pop() || 'unknown';
-        const filename = `${Date.now()}_${Math.random().toString(36).substring(7)}.${extension}`;
-        // chatId will safely be string here because we are in chat room
-        const storageRef = storage().ref(`chats/${chatId || 'general'}/${filename}`);
-        
-        await storageRef.putFile(fileData.uri);
-        downloadURL = await storageRef.getDownloadURL();
+
+      // Upload to PHP Server if it's a local file
+      if (fileData.uri.startsWith('content://') || fileData.uri.startsWith('file://')) {
+        const formData = new FormData();
+
+        // Ensure URI is correctly formatted for Android
+        let uri = fileData.uri;
+        if (Platform.OS === 'android' && !uri.startsWith('file://') && !uri.startsWith('content://')) {
+          uri = 'file://' + uri;
+        }
+
+        formData.append('image', {
+          uri: uri,
+          type: fileData.mimeType || 'application/octet-stream',
+          name: fileData.name || `file_${Date.now()}`,
+        } as any);
+
+        const uploadUrl = API_CONFIG.UPLOAD_URL;
+        console.log("[Chat] Uploading file to:", uploadUrl);
+
+        // Using XMLHttpRequest for better reliability on Android file uploads
+        const result: any = await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', uploadUrl);
+          xhr.setRequestHeader('Accept', 'application/json');
+          
+          xhr.onload = () => {
+            console.log("[Chat] Server Raw Response:", xhr.responseText);
+            try {
+              const res = JSON.parse(xhr.responseText);
+              if (xhr.status >= 200 && xhr.status < 300) {
+                resolve(res);
+              } else {
+                reject(new Error(res.message || res.error || `Upload failed with status ${xhr.status}`));
+              }
+            } catch (e) {
+              reject(new Error("Server returned non-JSON response"));
+            }
+          };
+
+          xhr.onerror = () => {
+             console.error("[Chat] XHR Network Error Details:", xhr);
+             reject(new Error("Network request failed. Please check if your PC firewall is open for port 8000."));
+          };
+
+          xhr.send(formData);
+        });
+
+        if (result.status === 'success' || result.url || result.data?.url) {
+          downloadURL = result.url || result.data?.url || result.path;
+          console.log("[Chat] Upload successful, URL:", downloadURL);
+        } else {
+          throw new Error(result.message || 'Upload failed');
+        }
       }
 
+      // 2. Save message to Firestore with the uploaded file URL
       await addDoc(collection(db, 'messages'), {
         senderId: currentUser.uid,
         receiverId: otherUser.uid,
@@ -225,9 +271,11 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
         fileName: fileData.name,
         timestamp: serverTimestamp(),
       });
+
+      console.log("[Chat] Message saved to Firestore");
     } catch (error) {
       console.error("[Chat] File send failed:", error);
-      Alert.alert('Error', 'Failed to upload and send file. Please ensure storage is configured.');
+      Alert.alert('Upload Error', error instanceof Error ? error.message : 'Unknown error occurred');
     } finally {
       setIsUploading(false);
     }
@@ -245,7 +293,8 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
       sendFileMessage({
         uri: asset.uri || '',
         name: asset.fileName || 'Image',
-        type: 'image'
+        type: 'image',
+        mimeType: asset.type
       });
     }
   };
@@ -261,7 +310,8 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
       sendFileMessage({
         uri: asset.uri || '',
         name: asset.fileName || 'Video',
-        type: 'video'
+        type: 'video',
+        mimeType: asset.type
       });
     }
   };
@@ -283,7 +333,8 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
         sendFileMessage({
           uri: res[0].uri,
           name: res[0].name || 'File',
-          type: fileType === 'audio' ? 'audio' : (fileType === 'gif' ? 'image' : 'file')
+          type: fileType === 'audio' ? 'audio' : (fileType === 'gif' ? 'image' : 'file'),
+          mimeType: res[0].type || undefined
         });
       }
     } catch (err: any) {
@@ -310,37 +361,57 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
       switch (item.type) {
         case 'image':
           return (
-            <Image
-              source={{ uri: item.fileUri }}
-              style={styles.messageImage}
-              resizeMode="cover"
-            />
+            <View>
+              <Image
+                source={{ uri: item.fileUri }}
+                style={styles.messageImage}
+                resizeMode="cover"
+              />
+              <View style={styles.imageOverlay}>
+                <Icon name="expand-outline" size={moderateScale(18)} color="#FFF" />
+              </View>
+            </View>
           );
         case 'video':
           return (
-            <View style={styles.fileContainer}>
-              <Icon name="videocam" size={moderateScale(30)} color={isMe ? "#FFF" : "#1565C0"} />
-              <Text style={[styles.fileName, isMe ? styles.whiteText : styles.blackText]} numberOfLines={1}>
-                {item.fileName || 'Video'}
-              </Text>
+            <View style={styles.fileCard}>
+              <View style={[styles.fileIconContainer, { backgroundColor: isMe ? 'rgba(255,255,255,0.2)' : '#E3F0FF' }]}>
+                <Icon name="videocam" size={moderateScale(28)} color={isMe ? "#FFF" : "#1565C0"} />
+              </View>
+              <View style={styles.fileInfo}>
+                <Text style={[styles.fileName, isMe ? styles.whiteText : styles.blackText]} numberOfLines={1}>
+                  {item.fileName || 'Video'}
+                </Text>
+                <Text style={[styles.fileSubText, isMe ? styles.lightText : styles.grayText]}>Video File</Text>
+              </View>
             </View>
           );
         case 'audio':
           return (
-            <View style={styles.fileContainer}>
-              <Icon name="musical-notes" size={moderateScale(30)} color={isMe ? "#FFF" : "#1565C0"} />
-              <Text style={[styles.fileName, isMe ? styles.whiteText : styles.blackText]} numberOfLines={1}>
-                {item.fileName || 'Audio'}
-              </Text>
+            <View style={styles.fileCard}>
+              <View style={[styles.fileIconContainer, { backgroundColor: isMe ? 'rgba(255,255,255,0.2)' : '#FFE3E3' }]}>
+                <Icon name="musical-notes" size={moderateScale(28)} color={isMe ? "#FFF" : "#FF5252"} />
+              </View>
+              <View style={styles.fileInfo}>
+                <Text style={[styles.fileName, isMe ? styles.whiteText : styles.blackText]} numberOfLines={1}>
+                  {item.fileName || 'Audio'}
+                </Text>
+                <Text style={[styles.fileSubText, isMe ? styles.lightText : styles.grayText]}>Audio Clip</Text>
+              </View>
             </View>
           );
         case 'file':
           return (
-            <View style={styles.fileContainer}>
-              <Icon name="document-text" size={moderateScale(30)} color={isMe ? "#FFF" : "#1565C0"} />
-              <Text style={[styles.fileName, isMe ? styles.whiteText : styles.blackText]} numberOfLines={1}>
-                {item.fileName || 'Document'}
-              </Text>
+            <View style={styles.fileCard}>
+              <View style={[styles.fileIconContainer, { backgroundColor: isMe ? 'rgba(255,255,255,0.2)' : '#E8F5E9' }]}>
+                <Icon name="document-text" size={moderateScale(28)} color={isMe ? "#FFF" : "#2E7D32"} />
+              </View>
+              <View style={styles.fileInfo}>
+                <Text style={[styles.fileName, isMe ? styles.whiteText : styles.blackText]} numberOfLines={1}>
+                  {item.fileName || 'Document'}
+                </Text>
+                <Text style={[styles.fileSubText, isMe ? styles.lightText : styles.grayText]}>Document</Text>
+              </View>
             </View>
           );
         default:
@@ -360,7 +431,7 @@ const ChatScreen: React.FC<Props> = ({ onNavigate, params }) => {
     };
 
     return (
-      <TouchableOpacity 
+      <TouchableOpacity
         activeOpacity={0.8}
         onPress={handlePressMessage}
         style={[styles.messageBubble, isMe ? styles.myBubble : styles.otherBubble, item.type === 'image' && styles.imageBubble]}
@@ -540,10 +611,42 @@ const styles = StyleSheet.create({
     width: horizontalScale(200),
   },
   fileName: {
-    fontSize: moderateScale(14),
-    marginLeft: horizontalScale(10),
+    fontSize: moderateScale(15),
+    fontWeight: '600',
+    color: '#333',
+  },
+  fileCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: moderateScale(8),
+    width: horizontalScale(220),
+    borderRadius: moderateScale(15),
+  },
+  fileIconContainer: {
+    width: moderateScale(45),
+    height: moderateScale(45),
+    borderRadius: moderateScale(12),
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: horizontalScale(12),
+  },
+  fileInfo: {
     flex: 1,
   },
+  fileSubText: {
+    fontSize: moderateScale(11),
+    marginTop: verticalScale(2),
+  },
+  imageOverlay: {
+    position: 'absolute',
+    top: moderateScale(8),
+    right: moderateScale(8),
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    borderRadius: moderateScale(8),
+    padding: moderateScale(4),
+  },
+  lightText: { color: 'rgba(255,255,255,0.7)' },
+  grayText: { color: '#888' },
   whiteText: { color: '#FFF' },
   blackText: { color: '#333' },
   timestamp: {
